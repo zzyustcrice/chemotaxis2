@@ -3,7 +3,7 @@
 #include <math.h>
 #include <stdlib.h>
 #include <time.h>
-#include <omp.h>// OpenMP编程需要包含的头文件
+#include <omp.h>// OpenMP headers
 #include<string.h>
 #include<vector>
 using namespace std;
@@ -46,7 +46,7 @@ int main() {
 	int tempint;
 	double tempdouble;
 	double q = 2;
-	int t = 0, tstep = 18000; //time step
+	int t = 0, tstep = 18000; //time steps
 	double totnoise = 0;
 	static int n[grid][grid] = { 0 };//record visit frequency
 	double d = 75, a = 2 * timelength, ea, b = 0.25*timelength;//decay exponent
@@ -851,7 +851,7 @@ node_t *ListDelete(node_t *currP, int value)
 	*/
 	return currP;
 }
-double initializeAngle() {
+double initializeAngle() {//randomly give an angle (-PI to PI)
 	double myrandom();
 	double r = myrandom();
 	return(PI*(2 * r - 1));
