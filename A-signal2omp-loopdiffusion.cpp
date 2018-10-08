@@ -1,25 +1,25 @@
-﻿#define _CRT_SECURE_NO_DEPRECATE
+#define _CRT_SECURE_NO_DEPRECATE
 #include <stdio.h>
 #include <math.h>
 #include <stdlib.h>
 #include <time.h>
-#include <omp.h>// OpenMP headers
+#include <omp.h>// OpenMP header
 #include<string.h>
 #include<vector>
 using namespace std;
-#define DEBUG 1
-#define CHEMOTAXIS 1
-#define NCPU 8
-#define N 300000
+#define DEBUG 0
+#define CHEMOTAXIS 1//1=have chemotaxis,0=no chemotaxis
+#define NCPU 8//number of parallel cpu
+#define N 300000//number of total cells(particles)
 #define PI 3.14159
 #define grid 500 // grid number
 #define length 2 // grid length 2um
 typedef struct Particle {
 	double x, y, h; // recording particle position and heading direction
-	double x0, y0, h0;
+	double x0, y0, h0;//recording particle position and heading direction at the end of last reversal
 	double y1, y2, y3;
-	int state;
-	int tc;
+	int state;//0=persistent state,1=non-persistent state
+	int tc;//internal timer for reversal;
 }Particles;
 typedef struct PeriodReve {
 	int i, t, t0;
@@ -39,28 +39,28 @@ int main() {
 	char s[50];
 	static double M[2 * length*grid][2 * length*grid] = {}, R[2 * length*grid][2 * length*grid] = {};//recording memory
 	static double A[length*grid / 5][length*grid / 5] = {}, R1[length*grid / 5][length*grid / 5] = {}, coe[length*grid / 5][length*grid / 5] = {};//recording chemotax
-	double timelength = 0.05, v0 = 5;
+	double timelength = 0.05, v0 = 5;//timelength=time step length, v0=cell speed at low cell density
 	double f[50] = { 0 }, ff = 0;
 	double noisetime = 1;
 	int k = 40;
 	int tempint;
 	double tempdouble;
 	double q = 2;
-	int t = 0, tstep = 18000; //time steps
+	int t = 0, tstep = 18000; //time step
 	double totnoise = 0;
 	static int n[grid][grid] = { 0 };//record visit frequency
-	double d = 75, a = 2 * timelength, ea, b = 0.25*timelength;//decay exponent
-	double lumda = d * timelength / 25;//lumda=Ddt/dl^2
+	double d = 75, a = 2 * timelength, ea, b = 0.25*timelength;//d=diffussion coeffcient, a=memory decay exponent, b=chemical decay exponent
+	double lumda = d * timelength / 25;//lumda=D*timelength/grid length^2
 	double *coep[length*grid / 5] = {};
-	double tavg = 3.3;
-	static Particles par[N] = {};
-	static Particles temp[N] = {};
+	double tavg = 3.3;//reversal time at low cell density
+	static Particles par[N] = {};//recording cells
+	static Particles temp[N] = {};//a cache for cells at each time step
 	static node_t Grid[grid][grid] = {};
 	int matrixInversion(double **a, int n);
-	double myrandom();
+	double myrandom();//random number from 0 to 1
 	void push(node_t * head, int val);
-	double initializeAngle();
-	vector<vector<double> > rundurations(48, vector<double>(2, 0));
+	double initializeAngle();//generate random angle from -PI to PI
+	vector<vector<double> > rundurations(48, vector<double>(2, 0));//record run durations
 	double position = 0;
 	int sizeofchefield = length * grid / 5;
 	//7/20/2016{
@@ -81,7 +81,7 @@ int main() {
 	p9 = fopen("runduration.txt", "rb");
 	//}
 	for (i = 0; i < 48; i++) {
-		fscanf(p9, "%lf	%lf", &rundurations[i][0], &rundurations[i][1]);
+		fscanf(p9, "%lf	%lf", &rundurations[i][0], &rundurations[i][1]);//read in run durations at different times(not necessarily used in simulation)
 	}
 	// initialize particles coordinates
 	srand(time(NULL));
@@ -107,17 +107,18 @@ int main() {
 	{
 		//		  fscanf(p0,"%lf, %lf, %lf\r\n",&par[i].x,&par[i].y,&par[i].h);
 		r = myrandom(); if (r == 1)r = 0;
-		par[i].x = grid * length*r;
+		par[i].x = grid * length*r;//x coordinates is random 
 		r = myrandom(); if (r == 1)r = 0;
-		par[i].y = grid * length*r;
-		par[i].h = initializeAngle();
+		par[i].y = grid * length*r;//y coordinates is random
+		par[i].h = initializeAngle();//a random angle
 		r = myrandom();
-		par[i].tc = tavg / timelength * r;
-		par[i].state = 0;
+		par[i].tc = tavg / timelength * r;//cells start with a random timer
+		par[i].state = 0;// cells start at persistent state
 		par[i].y1 = par[i].y2 = par[i].y3 = 0;
 
 		push(&Grid[(int)(par[i].x / length)][(int)(par[i].y / length)], i);
 	}
+	//set up coefficient matrix for diffusion
 	for (i = 0; i<sizeofchefield; i++)
 	{
 		coep[i] = coe[i];
@@ -128,13 +129,14 @@ int main() {
 		coe[i][i1] = -lumda;
 		coe[i][i2] = -lumda;
 	}
-	matrixInversion(coep, sizeofchefield);
-	for (t = 1; t < tstep; t++)
+	matrixInversion(coep, sizeofchefield);//calculate inversion of the coefficient matrix
+	for (t = 1; t < tstep; t++)//time step loop
 	{
-		//		printf("%d\n", t);
+	
 		//		while (rundurations[position][0] < (t - 6000)*timelength / 60.0 && position<47)position++;
 		//		tavg = rundurations[position][1];
-		memset(R1, 0, sizeof(R1));
+
+		memset(R1, 0, sizeof(R1));//reset matrix recording the chemical
 #pragma omp parallel for num_threads(NCPU) private(j)
 		for (i = 0; i < 2 * length*grid; i++)
 		{
@@ -145,14 +147,14 @@ int main() {
 		}
 
 		//noise in direction
-		totnoise += timelength / noisetime;
-		if (totnoise>1) {
+		totnoise += timelength / noisetime;//totnoise: timer for adding noise; noisetime:time interval for adding noise
+		if (totnoise>1) {//totnoise>1=time interval>noisetime, meaning it's time to add noise;
 			totnoise--;
 #pragma omp parallel for num_threads(NCPU) private(r)
 			for (i = 0; i<N; i++) {
 				r = 2 * myrandom();
-				r = (r - 1)*sqrt(PI*PI / 225 * noisetime);
-				par[i].h += r;
+				r = (r - 1)*sqrt(PI*PI / 225 * noisetime);//noise in direction
+				par[i].h += r;//adding noise 
 				while (par[i].h >= PI) { par[i].h -= 2 * PI; }
 				while (par[i].h<-PI) { par[i].h += 2 * PI; }
 
@@ -162,32 +164,34 @@ int main() {
 		for (i = 0; i < N; i++)
 		{
 			temp[i] = par[i];// record the particles position
-			n[(int)(par[i].x / length)][(int)(par[i].y / length)]++;
+			n[(int)(par[i].x / length)][(int)(par[i].y / length)]++;//visit frequency of this grid +1;
 		}
 #pragma omp parallel for num_threads(NCPU) private(r)
 		for (i = 0; i < N; i++)
 		{
-			r = myrandom()*0.4 - 0.2 + 1;
-			particlestep(p8, revdata, t, number, periodlength, ff, f, i, lumda, v0*r, timelength, Grid, temp, par, d, ea, b, n, M, R, A, R1, coe, tavg);
+			r = myrandom()*0.4 - 0.2 + 1;//random number from 0.8 to 1.2, used to add variation in cell speed;
+			particlestep(p8, revdata, t, number, periodlength, ff, f, i, lumda, v0*r, timelength, Grid, temp, par, d, ea, b, n, M, R, A, R1, coe, tavg);//time step of cell i
 
 		}
-		if (CHEMOTAXIS) {
+		if (CHEMOTAXIS) {//if have chemotaxis
 
 			for (i = 0; i < sizeofchefield; i++)
 				for (j = 0; j < sizeofchefield; j++)
 				{
-					A[i][j] = A[i][j] + R1[i][j]; R1[i][j] = A[i][j];
+					A[i][j] = A[i][j] + R1[i][j]; //add the chemical produced in this time step into the chemical matrix;
+					R1[i][j] = A[i][j];
 				}
 			//diffuse
+			//each time step is divided into multiple smaller time steps to make the chemical profile smoother, note that each time step must be divided into even number of steps
 			for (int diffuloop = 0; diffuloop < 4; diffuloop++) {
 				if (diffuloop % 2 == 0) {
-
+					//if it's even number step
 					for (i = 0; i < sizeofchefield; i++) {
 						i1 = i - 1; i2 = i + 1;
 						if (i1 < 0)i1 += sizeofchefield;
 						if (i2 >= sizeofchefield)i2 = 0;
 						for (j = 0; j < sizeofchefield; j++)
-							R1[i][j] = (1 - 2 * lumda - b)*A[i][j] + lumda * A[i1][j] + lumda * A[i2][j];
+							R1[i][j] = (1 - 2 * lumda - b)*A[i][j] + lumda * A[i1][j] + lumda * A[i2][j];//diffuse in x direction
 
 					}
 
@@ -195,31 +199,31 @@ int main() {
 						for (i = 0; i < sizeofchefield; i++) {
 							A[i][j] = 0;
 							for (l = 0; l < sizeofchefield; l++)
-								A[i][j] += R1[i][l] * coe[l][j];
+								A[i][j] += R1[i][l] * coe[l][j];//times the inversion matrix of coefficient
 						}
 				}
-				else {
+				else {//if it's odd number step
 					for (j = 0; j < sizeofchefield; j++)
 					{
 						j1 = j - 1; j2 = j + 1;
 						if (j1 < 0)j1 += sizeofchefield;
 						if (j2 >= sizeofchefield)j2 = 0;
 						for (i = 0; i < sizeofchefield; i++)
-							R1[i][j] = (1 - 2 * lumda - b)*A[i][j] + lumda * A[i][j1] + lumda * A[i][j2];
+							R1[i][j] = (1 - 2 * lumda - b)*A[i][j] + lumda * A[i][j1] + lumda * A[i][j2];//diffuse in y direction
 					}
 					for (j = 0; j < sizeofchefield; j++)
 						for (i = 0; i < sizeofchefield; i++) {
 							A[i][j] = 0;
 							for (l = 0; l < sizeofchefield; l++)
-								A[i][j] += R1[l][j] * coe[i][l];
+								A[i][j] += R1[l][j] * coe[i][l];//times the inversion matrix of coefficient
 						}
 				}
 			}
 		}
 		//update linked list
 		for (i = 0; i<N; i++) {
-			ListDelete(&Grid[(int)(temp[i].x / length)][(int)(temp[i].y / length)], i);
-			push(&Grid[(int)(par[i].x / length)][(int)(par[i].y / length)], i);
+			ListDelete(&Grid[(int)(temp[i].x / length)][(int)(temp[i].y / length)], i);//delete cell position before movement
+			push(&Grid[(int)(par[i].x / length)][(int)(par[i].y / length)], i);//add cell position after movement
 		}
 
 
@@ -243,7 +247,7 @@ int main() {
 
 
 		if (t % 120 == 0)
-		{
+		{//output cell position
 			sprintf(s, "particles%d.txt", t / 120);
 			p5 = fopen(s, "w");
 			//err handle
@@ -295,6 +299,7 @@ int main() {
 
 
 }
+//calculate each cell's movement at each timestep
 int particlestep(FILE *p8, vector<vector<PeriodRev> > &revdata, int t, int number[400], double periodlength[400], double ff, double f[50], int i, double lumda, double v0, double timelength, node_t Grid[grid][grid], Particles temp[N], Particles par[N], double d, double ea, double b, int n[grid][grid], double M[2 * length*grid][2 * length*grid], double R[2 * length*grid][2 * length*grid], double A[length*grid / 5][length*grid / 5], double R1[length*grid / 5][length*grid / 5], double coe[length*grid / 5][length*grid / 5], double tavg) {
 
 	int  j = 0, l = 0, i2 = 0, j2 = 0, tempint = 0, sum = 0;
@@ -320,23 +325,23 @@ int particlestep(FILE *p8, vector<vector<PeriodRev> > &revdata, int t, int numbe
 	double chemsignal = 0, tempdouble2 = 0;
 	double initializeAngle();
 	PeriodRev singlerev;
-	sum = nearbycount(i, par[i].x, par[i].y, 5, temp, Grid);
+	sum = nearbycount(i, par[i].x, par[i].y, 5, temp, Grid);//calculate number of nearby cells
 
 
-	par[i].tc++;
-	tempdouble = A[(int)(par[i].x) / 5][(int)(par[i].y) / 5];
+	par[i].tc++;//cell's internal timer +1
+	tempdouble = A[(int)(par[i].x) / 5][(int)(par[i].y) / 5];//get chemical density at cell's position
 	if (tempdouble<0)tempdouble = 0;
-	chemsignal = pow(tempdouble, 1) / (pow(45, 1) + pow(tempdouble, 1));
+	chemsignal = pow(tempdouble, 1) / (pow(45, 1) + pow(tempdouble, 1));//calculate chemical signal from chemical density
 	tempdouble2 = (chemsignal - par[i].y2);
-	par[i].y2 += (tempdouble2) / tadpt * timelength;
+	par[i].y2 += (tempdouble2) / tadpt * timelength;//calculate adaptation
 	if (par[i].state == 0)
-	{
-		tempdouble = tavg * exp(11.3* chemsignal - 12.4*par[i].y2);
-		m = tempdouble * tempdouble / tdvia / tdvia;
-		kapa = tempdouble / tdvia / tdvia;
+	{//if persistent state
+		tempdouble = tavg * exp(11.3* chemsignal - 12.4*par[i].y2);//calculate the run duration at this chemical signal
+		m = tempdouble * tempdouble / tdvia / tdvia;//m=(run duration)^2/(run duration deviation)^2,used in Gamma distribution
+		kapa = tempdouble / tdvia / tdvia;//kapa=(run duration)/(run duration deviation)^2,used in Gamma distribution
 		r = myrandom();
-		ff = ReversingProbability(m, kapa, par[i].tc, timelength);
-		if (r < ff) {
+		ff = ReversingProbability(m, kapa, par[i].tc, timelength);//calculate reversing probability using m,kapa and timer in this run
+		if (r < ff) {//if reverse
 			if (t > 6000) {
 				singlerev.i = i;
 				singlerev.t0 = t - par[i].tc;
@@ -354,12 +359,12 @@ int particlestep(FILE *p8, vector<vector<PeriodRev> > &revdata, int t, int numbe
 			//		periodlength[t / 30] += par[i].tc*timelength;
 			par[i].tc = 0;
 			par[i].x0 = par[i].x;
-			par[i].y0 = par[i].y;
-			tempdouble = A[(int)(par[i].x) / 5][(int)(par[i].y) / 5];
+			par[i].y0 = par[i].y;//record position
+			tempdouble = A[(int)(par[i].x) / 5][(int)(par[i].y) / 5];//get chemical density at cell's position
 			if (tempdouble < 0)tempdouble = 0;
-			tempdouble = 0.25 *(pow(15, 2) + 2.5*pow(tempdouble, 2)) / (pow(15, 2) + pow(tempdouble, 2));
+			tempdouble = 0.25 *(pow(15, 2) + 2.5*pow(tempdouble, 2)) / (pow(15, 2) + pow(tempdouble, 2));//calculate probablity of transiting to non-persistent state
 			r = myrandom();
-			if (r < tempdouble)par[i].state = 1;
+			if (r < tempdouble)par[i].state = 1;//transiting to non-persistent state
 			else {
 				if (par[i].h>0)par[i].h -= PI;//reversal
 				else par[i].h += PI;
@@ -368,15 +373,15 @@ int particlestep(FILE *p8, vector<vector<PeriodRev> > &revdata, int t, int numbe
 		}
 		if (sum >= 50)ps = 1;
 		else ps = f[sum];
-		v = v0 * (1 - 0.25* ps);
+		v = v0 * (1 - 0.25* ps);//cell speed reduction due to local cell density
 		dis = v * timelength;
 	}
-	if (par[i].state == 1) {
-		tempdouble = A[(int)(par[i].x) / 5][(int)(par[i].y) / 5];
+	if (par[i].state == 1) {//if non-persistent state
+		tempdouble = A[(int)(par[i].x) / 5][(int)(par[i].y) / 5];//get chemical density at cell's position
 		if (tempdouble < 0)tempdouble = 0;
-		tempdouble = 2.25 *(pow(24, 2) + 3.7*pow(tempdouble, 2)) / (pow(24, 2) + pow(tempdouble, 2));
+		tempdouble = 2.25 *(pow(24, 2) + 3.7*pow(tempdouble, 2)) / (pow(24, 2) + pow(tempdouble, 2));//calculate non-persistent state duration at this chemical density
 		if (par[i].tc>tempdouble / timelength)
-		{
+		{//if finish non-persistent state, randomly chose a direction
 			par[i].x0 = par[i].x;
 			par[i].y0 = par[i].y;
 			par[i].tc = 0;
@@ -386,7 +391,7 @@ int particlestep(FILE *p8, vector<vector<PeriodRev> > &revdata, int t, int numbe
 		if (sum >= 50)ps = 1;
 		else ps = f[sum];
 		v = v0 * (1 - 0.25* ps);
-		dis = v / 4 * timelength;
+		dis = v / 4 * timelength;//calculate movement, non-persistent cell speed is 0.25 of persistent state
 	}
 
 
@@ -398,17 +403,18 @@ int particlestep(FILE *p8, vector<vector<PeriodRev> > &revdata, int t, int numbe
 		if (j < 0)i2 = j + 2 * length*grid;
 		else if (j>2 * length*grid - 1)i2 = j - 2 * length*grid;
 		for (l = floor(2 * par[i].y - 2 * slimeradius - 1); l <= floor(2 * par[i].y + 2 * slimeradius + 1); l++)
-		{
+		{//loop through nearby grids
 			j2 = l;
 			if (l < 0)j2 = l + 2 * length*grid;
 			else if (l>2 * length*grid - 1)j2 = l - 2 * length*grid;
 			if (pow(j + 0.5 - 2 * par[i].x, 2) + pow(l + 0.5 - 2 * par[i].y, 2) < 4 * slimeradius*slimeradius&&M[i2][j2]>exp(-3)) {
+				//if the grid is within a certain distance and have memory above the detectable threshold
 				theta = atan(((double)(l)*0.5 + 0.25 - par[i].y) / ((double)(j)*0.5 + 0.25 - par[i].x));
 				if ((double)(j)*0.5 + 0.25 - par[i].x < 0)theta += PI;
 				theta -= par[i].h;
 				while (theta >  PI)theta -= 2 * PI;
-				while (theta <= -PI)theta += 2 * PI;
-
+				while (theta <= -PI)theta += 2 * PI;//calculate angle between the grid and cell moving direction
+				//calculate memory in each sector in the semicircle ahead of the cell.
 				if (theta > -PI / 2 && theta <= -0.3*PI)hd[0] += M[i2][j2];
 				else if (theta > -0.3*PI && theta <= -0.1*PI)hd[1] += M[i2][j2];
 				else if (theta > -0.1*PI && theta <= 0.1*PI)hd[2] += M[i2][j2];
@@ -419,7 +425,7 @@ int particlestep(FILE *p8, vector<vector<PeriodRev> > &revdata, int t, int numbe
 	}
 
 
-	r = angle(i, hd, beta, timelength, Grid, temp, par);
+	r = angle(i, hd, beta, timelength, Grid, temp, par);//calculate angle change due to alignment and trail following
 	r = r + par[i].h;
 	x1 = par[i].x + dis * cos(r);
 	y1 = par[i].y + dis * sin(r);
@@ -436,13 +442,13 @@ int particlestep(FILE *p8, vector<vector<PeriodRev> > &revdata, int t, int numbe
 	if (y1<0)y1 += grid * length;
 	else if (y1 >= grid * length)y1 -= grid * length;
 	if (CHEMOTAXIS&&t > 6000)
-		R1[(int)(x1) / 5][(int)(y1) / 5] += pchem * timelength*(0.8*pow(A[(int)(x1) / 5][(int)(y1) / 5], 3) / (pow(A[(int)(x1) / 5][(int)(y1) / 5], 3) + pow(10, 3)) + 0.2);
+		R1[(int)(x1) / 5][(int)(y1) / 5] += pchem * timelength*(0.8*pow(A[(int)(x1) / 5][(int)(y1) / 5], 3) / (pow(A[(int)(x1) / 5][(int)(y1) / 5], 3) + pow(10, 3)) + 0.2);//production of chemical
 	par[i].x = x1;
 	par[i].y = y1;
 	n[(int)(par[i].x / length)][(int)(par[i].y / length)]++;
 	return(0);
 }
-double ReversingProbability(double m, double kapa, int tc, double timelength) {
+double ReversingProbability(double m, double kapa, int tc, double timelength) {//use gamma funtion to calculate reversing probability
 	double tempdouble = 0;
 	double *ff;
 	int i;
@@ -458,7 +464,7 @@ double ReversingProbability(double m, double kapa, int tc, double timelength) {
 
 }
 
-double slimedeposit(double dt, double x1, double y1, double x, double y, double R[2 * length*grid][2 * length*grid]) {
+double slimedeposit(double dt, double x1, double y1, double x, double y, double R[2 * length*grid][2 * length*grid]) {//deposit slime(memory) based on cell's position
 	double y2, x2;
 	int j, j1, j2, j3;
 	int radius = 0;
@@ -556,12 +562,12 @@ double slimedeposit(double dt, double x1, double y1, double x, double y, double 
 		}
 	}
 }
-double myrandom() {
+double myrandom() {//random number generator 0 to 1
 	return(rand() / (double)RAND_MAX);
 
 }
 int matrixInversion(double **a, int n)
-{
+{//calculate n*n matrix inversion
 	int *is = new int[n];
 	int *js = new int[n];
 	int i, j, k;
@@ -633,13 +639,13 @@ int matrixInversion(double **a, int n)
 	delete[] is; delete[] js;
 	return(1);
 }
-double nearbycount(int i, double x, double y, double radius, Particles par[N], node_t Grid[grid][grid]) {
+double nearbycount(int i, double x, double y, double radius, Particles par[N], node_t Grid[grid][grid]) {//count nearby cells
 	int i0, i1, j1, j, k, tag = 0, sum = 0;
 	double theta = 0;
 	node_t * current;
-	k = radius / length + 1;
+	k = radius / length + 1;//number of nearby grids
 	for (i0 = (int)(floor(x / length - k)); i0 <= x / length + k; i0++)
-		for (j = (int)(floor(y / length - k)); j <= y / length + k; j++) {
+		for (j = (int)(floor(y / length - k)); j <= y / length + k; j++) {//loop through nearby grids
 			x = par[i].x; y = par[i].y;
 			//periodic boundary condition
 			i1 = i0; j1 = j;
@@ -648,10 +654,10 @@ double nearbycount(int i, double x, double y, double radius, Particles par[N], n
 			if (j<0) { j1 = j + grid; y += grid * length; }
 			else if (j>grid - 1) { j1 = j - grid; y -= grid * length; }
 			current = &Grid[i1][j1];
-			while (current->next != NULL) {
+			while (current->next != NULL) {//loop through all cells in each grid
 				current = current->next;
 				tag = current->val;
-				if (pow((x - par[tag].x), 2) + pow((y - par[tag].y), 2) <= radius * radius&&i != tag) {
+				if (pow((x - par[tag].x), 2) + pow((y - par[tag].y), 2) <= radius * radius&&i != tag) {//if it's within a certain distance and not the same cell
 
 					//					theta = atan((y - par[tag].y) / (x - par[tag].x));
 					//					if ((x - par[tag].x) > 0)theta += PI;
@@ -660,8 +666,7 @@ double nearbycount(int i, double x, double y, double radius, Particles par[N], n
 					//					while (theta <= -0.5*PI)theta += 2 * PI;
 					//					if (theta <= 0.5*PI)
 					//					{
-					sum++; //alignment += fabs(sin(par[tag].h - par[i].h));
-						   //					}
+					sum++; //increase the number;
 				}
 			}
 		}
@@ -670,7 +675,7 @@ double nearbycount(int i, double x, double y, double radius, Particles par[N], n
 }
 
 
-double angle(int i, double hd[5], double beta, double dt, node_t Grid[grid][grid], Particles temp[N], Particles par[N]) {
+double angle(int i, double hd[5], double beta, double dt, node_t Grid[grid][grid], Particles temp[N], Particles par[N]) {//calculate angle change due to alignment and trail following
 	node_t * current;
 	double F(double x); double Fad(double x);
 	double eali = 0.7, esli = 1.0, eden = 18, r = 0;
@@ -680,10 +685,11 @@ double angle(int i, double hd[5], double beta, double dt, node_t Grid[grid][grid
 	double dtr = 0.75, kad = 0, fad;
 	int i0, i1, j1, j, k, tag, sum = 0;
 	int count = 0;
-	//slime direction
+	//calculate the preferred trail following direction
 	for (j = 0; j<5; j++)
-		if (hdmax<hd[j])hdmax = hd[j];
-	hdmax = hdmax * 0.8;
+		if (hdmax<hd[j])hdmax = hd[j];//maximum memory in one sector
+	hdmax = hdmax * 0.8;//set the threshold to be 80% of the maximum memory
+	//find the smallest divation from heading direction that has memory above the threshold
 	if (hd[2] >= hdmax) { thetaslime = 0; }
 	else if (hd[1]>hd[3]) {
 		if (hd[1]>hdmax) { thetaslime = -0.2*PI; }
@@ -698,12 +704,12 @@ double angle(int i, double hd[5], double beta, double dt, node_t Grid[grid][grid
 	}
 	else if (hd[4]>hdmax) { thetaslime = 0.4*PI; }
 
-	//alignment
+	//alignment to nearby cells
 	x = temp[i].x; y = temp[i].y;
 
 	k = radius / length + 1;
 	for (i0 = (int)(floor(x / length - k)); i0 <= x / length + k; i0++)
-		for (j = (int)(floor(y / length - k)); j <= y / length + k; j++) {
+		for (j = (int)(floor(y / length - k)); j <= y / length + k; j++) {//loop through nearby grids
 			x = temp[i].x; y = temp[i].y;
 			//periodic boundary condition
 			i1 = i0; j1 = j;
@@ -712,12 +718,12 @@ double angle(int i, double hd[5], double beta, double dt, node_t Grid[grid][grid
 			if (j<0) { j1 = j + grid; y += grid * length; }
 			else if (j>grid - 1) { j1 = j - grid; y -= grid * length; }
 			current = &Grid[i1][j1];
-			while (current->next != NULL) {
+			while (current->next != NULL) {//loop through all cells in one grid
 				current = current->next;
 				tag = current->val;
-				if (pow((x - temp[tag].x), 2) + pow((y - temp[tag].y), 2) < radius*radius) {
+				if (pow((x - temp[tag].x), 2) + pow((y - temp[tag].y), 2) < radius*radius) {//if it's within the distance
 					count++;
-					thetalign += sin(2 * (temp[i].h - temp[tag].h));
+					thetalign += sin(2 * (temp[i].h - temp[tag].h));//calculate the alignment toward this neighbor
 
 
 				}
@@ -725,11 +731,11 @@ double angle(int i, double hd[5], double beta, double dt, node_t Grid[grid][grid
 		}
 
 
-	//density gradient
+	//density gradient push
 	x = temp[i].x; y = temp[i].y;
 	k = 2; f = 0, fad = 0;
 	for (i0 = (int)(floor(x / length - k)); i0 <= x / length + k; i0++)
-		for (j = (int)(floor(y / length - k)); j <= y / length + k; j++) {
+		for (j = (int)(floor(y / length - k)); j <= y / length + k; j++) {//loop through nearby grids
 			x = temp[i].x; y = temp[i].y;
 			//periodic boundary condition
 			i1 = i0; j1 = j;
@@ -738,39 +744,39 @@ double angle(int i, double hd[5], double beta, double dt, node_t Grid[grid][grid
 			if (j<0) { j1 = j + grid; y += grid * length; }
 			else if (j>grid - 1) { j1 = j - grid; y -= grid * length; }
 			current = &Grid[i1][j1];
-			while (current->next != NULL) {
+			while (current->next != NULL) {//loop through all cells in one grid
 				current = current->next;
 				tag = current->val;
-				if (pow((x - temp[tag].x), 2) + pow((y - temp[tag].y), 2) < 9 && tag != i) {
+				if (pow((x - temp[tag].x), 2) + pow((y - temp[tag].y), 2) < 9 && tag != i) {//if it's within the distance
 					x1 = temp[tag].x - x; y1 = temp[tag].y - y;
-					dis = x1 * cos(temp[i].h + PI / 2) + y1 * sin(temp[i].h + PI / 2);
+					dis = x1 * cos(temp[i].h + PI / 2) + y1 * sin(temp[i].h + PI / 2);//calculate the perpendicular distance 
 					if (fabs(dis) <= 0.5) {
-						f += F(dis);
+						f += F(dis);//if cells are too near, they push each other away
 					}
 					else if (fabs(dis) <= dtr) {
-						fad += Fad(dis) / (dtr - 1);
+						fad += Fad(dis) / (dtr - 1);//adhesive force between cells (not used in simulation)
 					}
 				}
 			}
 		}
 
-	par[i].x += eden * f*dt*cos(par[i].h + PI / 2) + kad * fad*dt*cos(par[i].h + PI / 2);
-	par[i].y += eden * f*dt*sin(par[i].h + PI / 2) + kad * fad*dt*sin(par[i].h + PI / 2);
+	par[i].x += eden * f*dt*cos(par[i].h + PI / 2) + kad * fad*dt*cos(par[i].h + PI / 2);//eden:parameter of repulsive interation
+	par[i].y += eden * f*dt*sin(par[i].h + PI / 2) + kad * fad*dt*sin(par[i].h + PI / 2);//kad: parameter of adhesive interation (set to 0, meaning no adhesive interaction)
 	if (count == 0)thetalign = 0;
 	else thetalign = thetalign * eali / count;
 	r = dt * (0 - thetalign + esli * sin(2 * thetaslime));
 	return(r);
 }
-double F(double x) {
+double F(double x) {//calculate repulsive force
 	if (x >= 0)return(x - 0.5);
 	else return(-F(-x));
 }
-double Fad(double x) {
+double Fad(double x) {//calculate adhesive force
 	if (x >= 0)return(x - 0.5);
 	else return(-F(-x));
 }
 
-double normal(double t) {
+double normal(double t) {//generate a normal distribution, this function is not used in this simulation
 	double myrandom();
 	double r, r1, r2;
 	double sigma = (PI*PI) / 225 / 3 * t*0.88;
@@ -851,7 +857,7 @@ node_t *ListDelete(node_t *currP, int value)
 	*/
 	return currP;
 }
-double initializeAngle() {//randomly give an angle (-PI to PI)
+double initializeAngle() {
 	double myrandom();
 	double r = myrandom();
 	return(PI*(2 * r - 1));
