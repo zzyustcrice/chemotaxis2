@@ -364,7 +364,7 @@ int particlestep(FILE *p8, vector<vector<PeriodRev> > &revdata, int t, int numbe
 			if (tempdouble < 0)tempdouble = 0;
 			tempdouble = 0.25 *(pow(15, 2) + 2.5*pow(tempdouble, 2)) / (pow(15, 2) + pow(tempdouble, 2));//calculate probablity of transiting to non-persistent state
 			r = myrandom();
-			if (r < tempdouble)par[i].state = 1;//transiting to non-persistent state
+			if (r < tempdouble){par[i].state = 1;par[i].h = initializeAngle();}//transiting to non-persistent state and randomly pick a new direction
 			else {
 				if (par[i].h>0)par[i].h -= PI;//reversal
 				else par[i].h += PI;
